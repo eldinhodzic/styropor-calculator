@@ -1,4 +1,4 @@
-const API_KEY_STORAGE_KEY = 'styrocalc_anthropic_api_key';
+const API_KEY_STORAGE_KEY = 'styrocalc_gemini_api_key';
 
 export function getApiKey(): string | null {
     return localStorage.getItem(API_KEY_STORAGE_KEY);

@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI, type Part } from "@google/generative-ai";
 import { getApiKey } from '../utils/storage';
 
 export interface VisionResult {
@@ -16,10 +16,8 @@ export async function analyzeWallImage(base64Image: string): Promise<VisionResul
     // Remove data:image/...;base64, prefix if present
     const base64Data = base64Image.split(',')[1] || base64Image;
 
-    const anthropic = new Anthropic({
-        apiKey: apiKey,
-        dangerouslyAllowBrowser: true // This is needed to run directly in the browser
-    });
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-3.0-flash" });
 
     const prompt = `
 Ik geef je een foto van een muur of gevel. Waarschijnlijk bevat de foto een A4-papier (29.7cm x 21cm) ter referentie of de gebruiker heeft een meter in beeld geplaatst.
@@ -45,46 +43,31 @@ Als er geen ramen/deuren (exclusions) zijn, retourneer dan een lege array [].
 Geef ALLEEN geldige JSON terug.`;
 
     try {
-        const response = await anthropic.messages.create({
-            model: "claude-3-5-sonnet-20241022", // the vision model
-            max_tokens: 1024,
-            messages: [
-                {
-                    role: "user",
-                    content: [
-                        {
-                            type: "image",
-                            source: {
-                                type: "base64",
-                                media_type: "image/jpeg",
-                                data: base64Data,
-                            }
-                        },
-                        {
-                            type: "text",
-                            text: prompt
-                        }
-                    ]
-                }
-            ]
-        });
+        const imagePart: Part = {
+            inlineData: {
+                data: base64Data,
+                mimeType: "image/jpeg"
+            }
+        };
 
-        // The response is array of content blocks, we need the text
-        const textContent = response.content.find(block => block.type === 'text');
-        if (!textContent || textContent.type !== 'text') {
+        const result = await model.generateContent([prompt, imagePart]);
+        const response = await result.response;
+        let textContent = response.text();
+
+        if (!textContent) {
             throw new Error("Ongeldig antwoord van de AI (Geen tekst gevonden).");
         }
 
-        // Try to parse JSON from the response. Claude sometimes wraps in markdown ```json blocks
-        let jsonStr = textContent.text.trim();
+        // Try to parse JSON from the response. Gemini sometimes wraps in markdown ```json blocks
+        let jsonStr = textContent.trim();
         if (jsonStr.startsWith('```json')) {
             jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
         } else if (jsonStr.startsWith('```')) {
             jsonStr = jsonStr.replace(/```/g, '').trim();
         }
 
-        const result = JSON.parse(jsonStr) as VisionResult;
-        return result;
+        const parsedResult = JSON.parse(jsonStr) as VisionResult;
+        return parsedResult;
 
     } catch (err: unknown) {
         if (err instanceof Error) {

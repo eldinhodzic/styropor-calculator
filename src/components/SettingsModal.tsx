@@ -27,7 +27,7 @@ export default function SettingsModal({ isOpen, onClose }: Props) {
     if (!isOpen) return null;
 
     const handleSave = () => {
-        if (apiKey.trim().startsWith('sk-ant')) {
+        if (apiKey.trim().startsWith('AIza')) {
             saveApiKey(apiKey.trim());
             setIsSaved(true);
             setTimeout(onClose, 1000);
@@ -35,7 +35,7 @@ export default function SettingsModal({ isOpen, onClose }: Props) {
             removeApiKey();
             setIsSaved(false);
         } else {
-            alert('Ongeldige Anthropic API Key. Moet beginnen met sk-ant');
+            alert('Ongeldige Gemini API Key. Moet beginnen met AIza');
         }
     };
 
@@ -64,10 +64,10 @@ export default function SettingsModal({ isOpen, onClose }: Props) {
                 <div className="p-6 space-y-4">
                     <div>
                         <label className="block text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
-                            <Key size={16} /> Anthropic API Key (Claude)
+                            <Key size={16} /> Google Gemini API Key
                         </label>
                         <p className="text-sm text-slate-500 mb-4">
-                            Om de AI Fotometing te gebruiken, vul je hier je Claude API Key in. Deze sleutel blijft lokaal op je toestel in de browser (`localStorage`) en wordt alleen naar Anthropic gestuurd.
+                            Om de AI Fotometing te gebruiken, vul je hier je Gemini API Key in via Google AI Studio. Deze sleutel blijft lokaal op je toestel in de browser (`localStorage`) en wordt alleen naar Google gestuurd.
                         </p>
                         <div className="relative">
                             <input
@@ -77,7 +77,7 @@ export default function SettingsModal({ isOpen, onClose }: Props) {
                                     setApiKey(e.target.value);
                                     setIsSaved(false);
                                 }}
-                                placeholder="sk-ant-..."
+                                placeholder="AIzaSy..."
                                 className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-4 pr-10 py-3 outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono text-sm transition-all text-slate-800"
                             />
                             {isSaved && (

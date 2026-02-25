@@ -39,7 +39,7 @@ function App() {
     try {
       if (!getApiKey()) {
         setIsSettingsOpen(true);
-        setAiError("Vul eerst je Anthropic API Key in om AI Fotometing te gebruiken.");
+        setAiError("Vul eerst je Gemini API Key in om AI Fotometing te gebruiken.");
         return;
       }
 
