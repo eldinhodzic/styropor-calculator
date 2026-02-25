@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import CameraTool from './components/CameraTool';
 import Visualizer from './components/Visualizer';
+import WallPainter from './components/WallPainter';
 import SettingsModal from './components/SettingsModal';
 import { analyzeWallImage } from './services/AiVisionService';
 import { calculateStyropor, type Exclusion } from './CalculatorEngine';
@@ -8,7 +9,7 @@ import { Ruler, LayoutDashboard, Settings, Plus, Trash2, AlertCircle } from 'luc
 import { getApiKey } from './utils/storage';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'measure' | 'calculate'>('measure');
+  const [activeTab, setActiveTab] = useState<'measure' | 'painter' | 'calculate'>('measure');
 
   const [wallWidth, setWallWidth] = useState<number>(500);
   const [wallHeight, setWallHeight] = useState<number>(300);
@@ -106,24 +107,33 @@ function App() {
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
 
       <main className="max-w-5xl mx-auto px-4 py-8">
-        <div className="flex space-x-1 bg-slate-200/50 p-1.5 rounded-xl mb-8 shadow-inner">
+        <div className="flex space-x-1 bg-slate-200/50 p-1.5 rounded-xl mb-8 shadow-inner overflow-x-auto">
           <button
             onClick={() => setActiveTab('measure')}
-            className={`flex-1 py-3 text-sm font-semibold rounded-lg transition-all ${activeTab === 'measure'
+            className={`flex-1 py-3 px-4 whitespace-nowrap text-sm font-semibold rounded-lg transition-all ${activeTab === 'measure'
               ? 'bg-white text-blue-700 shadow border border-slate-200/50'
               : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
               }`}
           >
-            1. Opmeten & Invoer
+            1. Opmeten
+          </button>
+          <button
+            onClick={() => setActiveTab('painter')}
+            className={`flex-1 py-3 px-4 whitespace-nowrap text-sm font-semibold rounded-lg transition-all ${activeTab === 'painter'
+              ? 'bg-white text-blue-700 shadow border border-slate-200/50'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
+              }`}
+          >
+            2. Tekenen
           </button>
           <button
             onClick={() => setActiveTab('calculate')}
-            className={`flex-1 py-3 text-sm font-semibold rounded-lg transition-all ${activeTab === 'calculate'
+            className={`flex-1 py-3 px-4 whitespace-nowrap text-sm font-semibold rounded-lg transition-all ${activeTab === 'calculate'
               ? 'bg-white text-blue-700 shadow border border-slate-200/50'
               : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
               }`}
           >
-            2. Resultaat & Snijplan
+            3. Resultaat
           </button>
         </div>
 
@@ -232,6 +242,38 @@ function App() {
                 Bereken Resultaat
               </button>
             </div>
+          </div>
+        )}
+
+        {activeTab === 'painter' && (
+          <div className="space-y-6 animate-in fade-in zoom-in-95 duration-300 relative z-0">
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 mb-4">
+              <p className="text-sm font-medium text-slate-700">
+                Kies je plaatformaat (voor weergave onderin component):
+              </p>
+              <div className="flex gap-4 mt-2">
+                <input type="number" placeholder="Br" value={panelWidth} onChange={e => setPanelWidth(Number(e.target.value))} className="w-20 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-sm font-bold" />
+                <span className="self-center">x</span>
+                <input type="number" placeholder="Hg" value={panelHeight} onChange={e => setPanelHeight(Number(e.target.value))} className="w-20 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-sm font-bold" />
+                <span className="self-center text-sm">cm</span>
+              </div>
+            </div>
+            <WallPainter
+              panelConfig={{ width: panelWidth, height: panelHeight }}
+              onExport={(wall, excls) => {
+                setWallWidth(Math.round(wall.width));
+                setWallHeight(Math.round(wall.height));
+                setExclusions(excls.map(e => ({
+                  ...e,
+                  id: e.id,
+                  x: Math.round(e.x),
+                  y: Math.round(e.y),
+                  width: Math.round(e.width),
+                  height: Math.round(e.height)
+                })));
+                setActiveTab('calculate');
+              }}
+            />
           </div>
         )}
 
