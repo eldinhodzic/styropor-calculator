@@ -1,8 +1,11 @@
 import { useState, useMemo } from 'react';
 import CameraTool from './components/CameraTool';
 import Visualizer from './components/Visualizer';
+import SettingsModal from './components/SettingsModal';
+import { analyzeWallImage } from './services/AiVisionService';
 import { calculateStyropor, type Exclusion } from './CalculatorEngine';
-import { Ruler, LayoutDashboard, Settings, Plus, Trash2 } from 'lucide-react';
+import { Ruler, LayoutDashboard, Settings, Plus, Trash2, AlertCircle } from 'lucide-react';
+import { getApiKey } from './utils/storage';
 
 function App() {
   const [activeTab, setActiveTab] = useState<'measure' | 'calculate'>('measure');
@@ -11,6 +14,10 @@ function App() {
   const [wallHeight, setWallHeight] = useState<number>(300);
   const [panelWidth, setPanelWidth] = useState<number>(100);
   const [panelHeight, setPanelHeight] = useState<number>(50);
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const [exclusions, setExclusions] = useState<Exclusion[]>([
     { id: '1', x: 200, y: 0, width: 100, height: 210 } // Standarch door
@@ -26,6 +33,47 @@ function App() {
 
   const updateExclusion = (id: string, field: keyof Exclusion, value: number) => {
     setExclusions(exclusions.map(e => e.id === id ? { ...e, [field]: value } : e));
+  };
+
+  const handleCameraCapture = async (base64Image: string) => {
+    try {
+      if (!getApiKey()) {
+        setIsSettingsOpen(true);
+        setAiError("Vul eerst je Anthropic API Key in om AI Fotometing te gebruiken.");
+        return;
+      }
+
+      setIsAiLoading(true);
+      setAiError(null);
+
+      const visionData = await analyzeWallImage(base64Image);
+
+      // Update form state with the AI answers
+      setWallWidth(visionData.wall.width);
+      setWallHeight(visionData.wall.height);
+
+      if (visionData.exclusions && Array.isArray(visionData.exclusions)) {
+        const newExclusions = visionData.exclusions.map(e => ({
+          id: Date.now().toString() + Math.random().toString(),
+          width: e.width,
+          height: e.height,
+          x: e.x,
+          y: e.y
+        }));
+        setExclusions(newExclusions);
+      } else {
+        setExclusions([]);
+      }
+
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setAiError(err.message);
+      } else {
+        setAiError("Fout bij ophalen AI fotometing.");
+      }
+    } finally {
+      setIsAiLoading(false);
+    }
   };
 
   const result = useMemo(() => {
@@ -49,11 +97,13 @@ function App() {
               Styro<span className="text-blue-600">Calc</span>
             </h1>
           </div>
-          <button className="p-2 text-slate-500 hover:text-blue-600 bg-slate-50 rounded-full hover:bg-blue-50 transition-colors">
+          <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-slate-500 hover:text-blue-600 bg-slate-50 rounded-full hover:bg-blue-50 transition-colors">
             <Settings size={20} />
           </button>
         </div>
       </header>
+
+      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
 
       <main className="max-w-5xl mx-auto px-4 py-8">
         <div className="flex space-x-1 bg-slate-200/50 p-1.5 rounded-xl mb-8 shadow-inner">
@@ -79,7 +129,15 @@ function App() {
 
         {activeTab === 'measure' && (
           <div className="space-y-6">
-            <CameraTool />
+
+            {aiError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl flex items-start gap-3">
+                <AlertCircle className="shrink-0 mt-0.5" size={20} />
+                <p className="text-sm font-medium">{aiError}</p>
+              </div>
+            )}
+
+            <CameraTool onCapture={handleCameraCapture} isLoading={isAiLoading} />
 
             <div className="grid md:grid-cols-2 gap-6">
               {/* Muur Afmetingen */}
