@@ -17,7 +17,7 @@ export async function analyzeWallImage(base64Image: string): Promise<VisionResul
     const base64Data = base64Image.split(',')[1] || base64Image;
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-3.0-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
 
     const prompt = `
 Ik geef je een foto van een muur of gevel. Waarschijnlijk bevat de foto een A4-papier (29.7cm x 21cm) ter referentie of de gebruiker heeft een meter in beeld geplaatst.
