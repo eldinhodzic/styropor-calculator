@@ -1,9 +1,8 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Camera, Image as ImageIcon, Ruler, Square, PlusSquare, Undo, RefreshCw, Calculator } from 'lucide-react';
+import React, { useState, useRef, useMemo, useCallback } from 'react';
+import { Camera, Image as ImageIcon, PlusSquare, Trash2, Maximize, Loader2, Calculator } from 'lucide-react';
+import { analyzeWallImageForPainter } from '../services/AiVisionService';
 
-export type Point = { x: number; y: number };
-
-export interface ExclusionConfig {
+export type ExclusionConfig = {
     id: string;
     x: number;
     y: number;
@@ -16,69 +15,116 @@ interface Props {
     onExport: (wall: { width: number; height: number }, exclusions: ExclusionConfig[]) => void;
 }
 
-type ToolMode = 'reference' | 'main' | 'exclusion' | 'none';
+type RectType = 'wall' | 'window' | 'door';
 
-function polygonArea(points: Point[]): number {
-    if (points.length < 3) return 0;
-    let area = 0;
-    for (let i = 0; i < points.length; i++) {
-        const j = (i + 1) % points.length;
-        area += points[i].x * points[j].y - points[j].x * points[i].y;
-    }
-    return Math.abs(area / 2);
-}
+type Rect = {
+    id: string;
+    type: RectType;
+    x: number;   // 0-1
+    y: number;
+    w: number;
+    h: number;
+};
 
-function getBoundingBox(points: Point[]) {
-    if (points.length === 0) return { minX: 0, maxX: 0, minY: 0, maxY: 0, width: 0, height: 0 };
-    let minX = points[0].x, maxX = points[0].x;
-    let minY = points[0].y, maxY = points[0].y;
-    for (const p of points) {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-    }
-    return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
-}
+type HandleType = 'tl' | 'tr' | 'bl' | 'br' | 't' | 'b' | 'l' | 'r' | 'move';
 
 export default function WallPainter({ panelConfig, onExport }: Props) {
     const [photo, setPhoto] = useState<string | null>(null);
-    const [scale, setScale] = useState<number | null>(null); // pixels per cm
+    const [imgNatSize, setImgNatSize] = useState<{ w: number; h: number } | null>(null);
 
-    const [mode, setMode] = useState<ToolMode>('reference');
+    const [aiStatus, setAiStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+    const [aiErrorMsg, setAiErrorMsg] = useState<string | null>(null);
 
-    // Drawing state (percentages 0-1 to handle resize)
-    const [referenceLine, setReferenceLine] = useState<[Point, Point] | null>(null);
-    const [referenceInput, setReferenceInput] = useState<string>('');
+    const [rects, setRects] = useState<Rect[]>([]);
+    const [selectedRectId, setSelectedRectId] = useState<string | null>(null);
+    const [settingMeasureId, setSettingMeasureId] = useState<string | null>(null);
 
-    const [mainPolygon, setMainPolygon] = useState<Point[]>([]);
-    const [isMainClosed, setIsMainClosed] = useState(false);
+    // The absolute scale mapping: how many CM is the full width of the original image.
+    // We initialize it to 1000cm to have a somewhat realistic default until they calibrate.
+    const [imageWidthCm, setImageWidthCm] = useState<number | null>(null);
 
-    const [exclusions, setExclusions] = useState<Point[][]>([]);
-    const [currentExclusion, setCurrentExclusion] = useState<Point[]>([]);
-
-    const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
-    const imageRef = useRef<HTMLImageElement | null>(null);
+    const wrapperRef = useRef<HTMLDivElement>(null); // the absolute div exactly fitting the image
 
-    const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Pointer tracking for drag & drop
+    const draggingRef = useRef<{
+        id: string;
+        handle: HandleType;
+        startX: number;
+        startY: number;
+        startRect: Rect
+    } | null>(null);
 
-    // Load photo
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
             const reader = new FileReader();
             reader.onloadend = () => {
-                setPhoto(reader.result as string);
-                const img = new Image();
-                img.onload = () => {
-                    imageRef.current = img;
-                    draw();
-                };
-                img.src = reader.result as string;
+                loadPhotoAndAnalyze(reader.result as string);
             };
             reader.readAsDataURL(file);
         }
+    };
+
+    const loadPhotoAndAnalyze = async (base64: string) => {
+        setPhoto(base64);
+        setAiStatus('loading');
+        setAiErrorMsg(null);
+        setRects([]);
+        setImageWidthCm(null);
+        setSelectedRectId(null);
+
+        const img = new Image();
+        img.onload = async () => {
+            setImgNatSize({ w: img.naturalWidth, h: img.naturalHeight });
+
+            try {
+                const result = await analyzeWallImageForPainter(base64);
+
+                const newRects: Rect[] = [];
+                if (result.mainWall) {
+                    newRects.push({
+                        id: 'wall-main',
+                        type: 'wall',
+                        x: result.mainWall.x,
+                        y: result.mainWall.y,
+                        w: result.mainWall.w,
+                        h: result.mainWall.h
+                    });
+
+                    // If they provided estimate
+                    if (result.estimatedMainWallCm && result.estimatedMainWallCm.w > 0) {
+                        setImageWidthCm(result.estimatedMainWallCm.w / result.mainWall.w);
+                    }
+                }
+
+                if (result.exclusions && Array.isArray(result.exclusions)) {
+                    result.exclusions.forEach((exc, i) => {
+                        newRects.push({
+                            id: `exc-${i}`,
+                            type: exc.type === 'window' ? 'window' : 'door',
+                            x: exc.x,
+                            y: exc.y,
+                            w: exc.w,
+                            h: exc.h
+                        });
+                    });
+                }
+
+                if (!imageWidthCm && newRects.length > 0) {
+                    // fallback default
+                    setImageWidthCm(800);
+                }
+
+                setRects(newRects);
+                setAiStatus('done');
+            } catch (err: any) {
+                console.error(err);
+                setAiStatus('error');
+                setAiErrorMsg(err.message || 'Fout bij analyseren.');
+            }
+        };
+        img.src = base64;
     };
 
     const handleCameraCapture = async () => {
@@ -88,9 +134,6 @@ export default function WallPainter({ panelConfig, onExport }: Props) {
             video.srcObject = stream;
             video.play();
 
-            // Basic implementation for camera: just wait 1 sec to focus then snap
-            // A better robust implementation might need a dedicated UI like CameraTool.tsx 
-            // but sticking to instructions:
             setTimeout(() => {
                 const canvas = document.createElement('canvas');
                 canvas.width = video.videoWidth || 1920;
@@ -99,298 +142,178 @@ export default function WallPainter({ panelConfig, onExport }: Props) {
                 if (ctx) {
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     const data = canvas.toDataURL('image/jpeg');
-                    setPhoto(data);
-                    const img = new Image();
-                    img.onload = () => {
-                        imageRef.current = img;
-                        draw();
-                    };
-                    img.src = data;
+                    loadPhotoAndAnalyze(data);
                 }
                 stream.getTracks().forEach(t => t.stop());
             }, 1000);
-
         } catch (e) {
-            alert('Camera fout');
+            alert('Camera kon niet worden gestart. Toestemming geweigerd?');
         }
     };
 
-    // Canvas Drawing
-    const draw = useCallback(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
+    const addManualRect = () => {
+        setRects(prev => [...prev, {
+            id: `manual-${Date.now()}`,
+            type: 'window',
+            x: 0.4,
+            y: 0.4,
+            w: 0.2,
+            h: 0.2
+        }]);
+    };
 
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const deleteRect = (id: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        setRects(prev => prev.filter(r => r.id !== id));
+        if (selectedRectId === id) setSelectedRectId(null);
+        if (settingMeasureId === id) setSettingMeasureId(null);
+    };
 
-        if (imageRef.current) {
-            // Draw image to fill bounds or fit bounds
-            const img = imageRef.current;
-            const { width, height } = canvas;
+    const cycleType = (id: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        setRects(prev => prev.map(r => {
+            if (r.id !== id) return r;
+            let next: RectType = 'window';
+            if (r.type === 'window') next = 'door';
+            else if (r.type === 'door') next = 'wall';
+            return { ...r, type: next };
+        }));
+    };
 
-            const scaleImage = Math.max(width / img.width, height / img.height);
-            const x = (width / 2) - (img.width / 2) * scaleImage;
-            const y = (height / 2) - (img.height / 2) * scaleImage;
+    const getRectCm = useCallback((r: Rect) => {
+        if (!imageWidthCm || !imgNatSize) return { w: 0, h: 0 };
+        const wCm = r.w * imageWidthCm;
+        const hCm = r.h * imageWidthCm * (imgNatSize.h / imgNatSize.w);
+        return { w: wCm, h: hCm };
+    }, [imageWidthCm, imgNatSize]);
 
-            ctx.globalAlpha = 0.6; // Slightly dim image to see lines
-            ctx.drawImage(img, x, y, img.width * scaleImage, img.height * scaleImage);
-            ctx.globalAlpha = 1.0;
-        }
+    const setRectCm = (rect: Rect, newWCm: number) => {
+        if (newWCm <= 0) return;
+        // Calculate new global imageWidthCm based on this rect's w percentage
+        setImageWidthCm(newWCm / rect.w);
+    };
 
-        // Helper to draw points
-        const drawPoints = (points: Point[], color: string, closed: boolean, fillColor?: string) => {
-            if (points.length === 0) return;
+    const setRectCmHeight = (rect: Rect, newHCm: number) => {
+        if (newHCm <= 0 || !imgNatSize) return;
+        // newHCm = rect.h * newImageWidthCm * (natH / natW)
+        setImageWidthCm(newHCm / (rect.h * (imgNatSize.h / imgNatSize.w)));
+    };
 
-            ctx.beginPath();
-            // Map percentages to pixels
-            const pxs = points.map(p => ({ x: p.x * canvas.width, y: p.y * canvas.height }));
+    // Drag & Drop logic
+    const handlePointerDown = (id: string, handle: HandleType, e: React.PointerEvent) => {
+        e.stopPropagation();
+        setSelectedRectId(id);
+        setSettingMeasureId(null); // hide measure on interact
 
-            ctx.moveTo(pxs[0].x, pxs[0].y);
-            for (let i = 1; i < pxs.length; i++) {
-                ctx.lineTo(pxs[i].x, pxs[i].y);
-            }
+        const wrapper = wrapperRef.current;
+        if (!wrapper) return;
+        const rect = rects.find(r => r.id === id);
+        if (!rect) return;
 
-            if (closed && pxs.length > 2) {
-                ctx.closePath();
-                if (fillColor) {
-                    ctx.fillStyle = fillColor;
-                    ctx.fill();
-                }
-            }
+        e.currentTarget.setPointerCapture(e.pointerId);
 
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 3;
-            if (!closed) {
-                ctx.setLineDash([5, 5]);
-            } else {
-                ctx.setLineDash([]);
-            }
-            ctx.stroke();
-            ctx.setLineDash([]);
-
-            // Draw dots
-            pxs.forEach((p) => {
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
-                ctx.fillStyle = 'white';
-                ctx.fill();
-                ctx.lineWidth = 2;
-                ctx.strokeStyle = color;
-                ctx.stroke();
-            });
-
-            if (closed && scale && pxs.length > 2) {
-                // Draw area label in center
-                const minX = Math.min(...pxs.map(p => p.x));
-                const maxX = Math.max(...pxs.map(p => p.x));
-                const minY = Math.min(...pxs.map(p => p.y));
-                const maxY = Math.max(...pxs.map(p => p.y));
-                const cx = (minX + maxX) / 2;
-                const cy = (minY + maxY) / 2;
-
-                // area in pixels
-                const areaPx = polygonArea(pxs);
-                // area in cm2
-                const areaCm2 = areaPx / (scale * scale);
-                const areaM2 = (areaCm2 / 10000).toFixed(2);
-
-                ctx.fillStyle = 'white';
-                ctx.font = 'bold 14px sans-serif';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.shadowColor = 'rgba(0,0,0,0.5)';
-                ctx.shadowBlur = 4;
-                ctx.fillText(`${areaM2} m²`, cx, cy);
-                ctx.shadowBlur = 0;
-            }
+        draggingRef.current = {
+            id,
+            handle,
+            startX: e.clientX,
+            startY: e.clientY,
+            startRect: { ...rect }
         };
+    };
 
-        // Draw reference line
-        if (referenceLine) {
-            const [p1, p2] = referenceLine;
-            if (p1) {
-                ctx.beginPath();
-                ctx.arc(p1.x * canvas.width, p1.y * canvas.height, 6, 0, 2 * Math.PI);
-                ctx.fillStyle = 'yellow';
-                ctx.fill();
-                ctx.stroke();
-            }
-            if (p1 && p2) {
-                ctx.beginPath();
-                ctx.moveTo(p1.x * canvas.width, p1.y * canvas.height);
-                ctx.lineTo(p2.x * canvas.width, p2.y * canvas.height);
-                ctx.strokeStyle = 'yellow';
-                ctx.lineWidth = 3;
-                ctx.stroke();
+    const onPointerMove = (e: React.PointerEvent) => {
+        if (!draggingRef.current || !wrapperRef.current) return;
+        const { id, handle, startX, startY, startRect } = draggingRef.current;
 
-                ctx.beginPath();
-                ctx.arc(p2.x * canvas.width, p2.y * canvas.height, 6, 0, 2 * Math.PI);
-                ctx.fillStyle = 'yellow';
-                ctx.fill();
-                ctx.stroke();
-            }
-        }
+        // Calculate delta in percentages
+        const bounds = wrapperRef.current.getBoundingClientRect();
+        const dx = (e.clientX - startX) / bounds.width;
+        const dy = (e.clientY - startY) / bounds.height;
 
-        // Draw main
-        drawPoints(mainPolygon, '#3b82f6', isMainClosed, 'rgba(59, 130, 246, 0.4)');
+        setRects(prev => prev.map(r => {
+            if (r.id !== id) return r;
+            let { x, y, w, h } = startRect;
 
-        // Draw exclusions
-        exclusions.forEach(exc => drawPoints(exc, '#ef4444', true, 'rgba(239, 68, 68, 0.4)'));
-        drawPoints(currentExclusion, '#ef4444', false);
-
-    }, [referenceLine, mainPolygon, isMainClosed, exclusions, currentExclusion, scale]);
-
-    useEffect(() => {
-        draw();
-    }, [draw]);
-
-    useEffect(() => {
-        const handleResize = () => draw();
-        window.addEventListener('resize', handleResize);
-        return () => window.removeEventListener('resize', handleResize);
-    }, [draw]);
-
-    const handlePointerDown = (clientX: number, clientY: number) => {
-        if (!canvasRef.current) return;
-        const rect = canvasRef.current.getBoundingClientRect();
-        const x = (clientX - rect.left) / rect.width;
-        const y = (clientY - rect.top) / rect.height;
-
-        // Check if we tapped close to first point of active polygon
-        if (mode === 'main' && mainPolygon.length > 2 && !isMainClosed) {
-            const first = mainPolygon[0];
-            const dist = Math.sqrt(Math.pow(first.x - x, 2) + Math.pow(first.y - y, 2));
-            if (dist < 0.05) {
-                setIsMainClosed(true);
-                setMode('exclusion');
-                return;
-            }
-        } else if (mode === 'exclusion' && currentExclusion.length > 2) {
-            const first = currentExclusion[0];
-            const dist = Math.sqrt(Math.pow(first.x - x, 2) + Math.pow(first.y - y, 2));
-            if (dist < 0.05) {
-                setExclusions([...exclusions, currentExclusion]);
-                setCurrentExclusion([]);
-                return;
-            }
-        }
-
-        if (mode === 'reference') {
-            if (!referenceLine) {
-                setReferenceLine([{ x, y }, { x, y }]); // temporary second pos
-            } else if (referenceLine.length === 2 && referenceLine[0].x === referenceLine[1].x && referenceLine[1].x === x) {
-                // this helps click 2 setup
+            if (handle === 'move') {
+                x += dx;
+                y += dy;
             } else {
-                // setting second point
-                // handled in up
+                if (handle.includes('l')) { x += dx; w -= dx; }
+                if (handle.includes('r')) { w += dx; }
+                if (handle.includes('t')) { y += dy; h -= dy; }
+                if (handle.includes('b')) { h += dy; }
             }
-        } else if (mode === 'main' && !isMainClosed) {
-            setMainPolygon([...mainPolygon, { x, y }]);
-        } else if (mode === 'exclusion') {
-            setCurrentExclusion([...currentExclusion, { x, y }]);
+
+            // Constraints
+            w = Math.max(0.02, w);
+            h = Math.max(0.02, h);
+            x = Math.max(0, Math.min(x, 1 - w));
+            y = Math.max(0, Math.min(y, 1 - h));
+
+            return { ...r, x, y, w, h };
+        }));
+    };
+
+    const onPointerUp = (e: React.PointerEvent) => {
+        if (draggingRef.current) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+            draggingRef.current = null;
         }
     };
 
-    const handlePointerUp = (clientX: number, clientY: number) => {
-        if (mode === 'reference' && referenceLine && referenceLine[0].x === referenceLine[1].x) {
-            const rect = canvasRef.current?.getBoundingClientRect();
-            if (rect) {
-                const x = (clientX - rect.left) / rect.width;
-                const y = (clientY - rect.top) / rect.height;
-                const dist = Math.sqrt(Math.pow(referenceLine[0].x - x, 2) + Math.pow(referenceLine[0].y - y, 2));
-                if (dist > 0.01) {
-                    setReferenceLine([referenceLine[0], { x, y }]);
-                }
-            }
-        }
-    };
-
-    const setReferenceScale = () => {
-        if (referenceLine && referenceInput && canvasRef.current) {
-            const [p1, p2] = referenceLine;
-            const rect = canvasRef.current.getBoundingClientRect();
-            const px1 = p1.x * rect.width;
-            const py1 = p1.y * rect.height;
-            const px2 = p2.x * rect.width;
-            const py2 = p2.y * rect.height;
-
-            const distancePx = Math.sqrt(Math.pow(px2 - px1, 2) + Math.pow(py2 - py1, 2));
-            const cm = parseFloat(referenceInput);
-            if (!isNaN(cm) && cm > 0) {
-                setScale(distancePx / cm);
-                setMode('main');
-            }
-        }
-    };
-
+    // Calculation for bottom bar
     const calculations = useMemo(() => {
-        if (!scale || !isMainClosed || !canvasRef.current) return null;
-        const cw = canvasRef.current.width;
-        const ch = canvasRef.current.height;
+        if (!imageWidthCm || !imgNatSize || !rects.length) return null;
 
-        // Main wall box in px
-        const mainPxPoints = mainPolygon.map(p => ({ x: p.x * cw, y: p.y * ch }));
-        const wallBoxPx = getBoundingBox(mainPxPoints);
-        const wallWidthCm = wallBoxPx.width / scale;
-        const wallHeightCm = wallBoxPx.height / scale;
+        const wallRects = rects.filter(r => r.type === 'wall');
+        let totalWallCm2 = 0;
 
-        const wallAreaCm2 = polygonArea(mainPxPoints) / (scale * scale);
+        let mainWallRect = wallRects[0];
+        if (!mainWallRect) return null; // No wall defined
 
-        let exclAreaCm2 = 0;
-        const exclusionsFormatted: ExclusionConfig[] = exclusions.map((excPoints, idx) => {
-            const pxPoints = excPoints.map(p => ({ x: p.x * cw, y: p.y * ch }));
-            exclAreaCm2 += polygonArea(pxPoints) / (scale * scale);
-            const boxPx = getBoundingBox(pxPoints);
+        for (const wr of wallRects) {
+            const dim = getRectCm(wr);
+            totalWallCm2 += dim.w * dim.h;
+        }
 
-            // relative to main wall minX, maxY (bottom-left)
-            const x_van_links_px = boxPx.minX - wallBoxPx.minX;
-            // Y van onder is Wall bottom (maxY) minus Exclusion bottom (maxY)
-            const y_van_onder_px = wallBoxPx.maxY - boxPx.maxY;
+        let exclusionsCm2 = 0;
+        const exclusionsFormatted: ExclusionConfig[] = [];
 
-            return {
-                id: `exc-draw-${idx}`,
-                x: x_van_links_px / scale,
-                y: y_van_onder_px / scale,
-                width: boxPx.width / scale,
-                height: boxPx.height / scale
-            };
+        const excRects = rects.filter(r => r.type !== 'wall');
+        excRects.forEach((exc, idx) => {
+            const dim = getRectCm(exc);
+            exclusionsCm2 += dim.w * dim.h;
+
+            // Calculate X van links and Y van onder relative to the main wall!
+            // App.tsx logic expects coords relative to bottom-left of the main wall.
+            const mainWallBottomY = mainWallRect.y + mainWallRect.h;
+            const excBottomY = exc.y + exc.h;
+
+            // Convert diff in percentages to CM
+            const xCm = Math.max(0, (exc.x - mainWallRect.x) * imageWidthCm);
+            const yCm = Math.max(0, (mainWallBottomY - excBottomY) * imageWidthCm * (imgNatSize.h / imgNatSize.w));
+
+            exclusionsFormatted.push({
+                id: `painter-exc-${idx}`,
+                x: xCm,
+                y: yCm,
+                width: dim.w,
+                height: dim.h
+            });
         });
 
-        const netAreaM2 = (wallAreaCm2 - exclAreaCm2) / 10000;
-
-        // Quick estimate for display
+        const netAreaM2 = Math.max(0, totalWallCm2 - exclusionsCm2) / 10000;
         const panelAreaCm2 = panelConfig.width * panelConfig.height;
-        const panelsNeeded = Math.ceil((wallAreaCm2 - exclAreaCm2) / panelAreaCm2);
+        const panelsNeeded = Math.ceil(Math.max(0, totalWallCm2 - exclusionsCm2) / panelAreaCm2);
 
         return {
             netAreaM2,
             panelsNeeded,
-            exportWall: { width: wallWidthCm, height: wallHeightCm },
+            exportWall: { width: getRectCm(mainWallRect).w, height: getRectCm(mainWallRect).h },
             exportExcls: exclusionsFormatted
         };
+    }, [rects, imageWidthCm, imgNatSize, panelConfig, getRectCm]);
 
-    }, [mainPolygon, isMainClosed, exclusions, scale, panelConfig]);
-
-    const undo = () => {
-        if (mode === 'main' && !isMainClosed && mainPolygon.length > 0) {
-            setMainPolygon(mainPolygon.slice(0, -1));
-        } else if (mode === 'exclusion' && currentExclusion.length > 0) {
-            setCurrentExclusion(currentExclusion.slice(0, -1));
-        } else if (mode === 'exclusion' && currentExclusion.length === 0 && exclusions.length > 0) {
-            setExclusions(exclusions.slice(0, -1));
-        }
-    };
-
-    const resetAll = () => {
-        setMainPolygon([]);
-        setIsMainClosed(false);
-        setExclusions([]);
-        setCurrentExclusion([]);
-        setReferenceLine(null);
-        setScale(null);
-        setMode('reference');
-    };
 
     if (!photo) {
         return (
@@ -401,7 +324,7 @@ export default function WallPainter({ panelConfig, onExport }: Props) {
                 <div>
                     <h3 className="text-lg font-semibold text-slate-800">Tekenmodule Starten</h3>
                     <p className="text-sm text-slate-500 max-w-sm mt-1">
-                        Maak een foto van de gevel op de bouwplaats om handmatig snijlijnen en uitsluitingen te tekenen.
+                        Maak een foto van de gevel. Google Gemini zal automatisch alle ramen en deuren herkennen en voortekenen op schaal!
                     </p>
                 </div>
                 <div className="flex space-x-3 w-full max-w-xs pt-4">
@@ -422,87 +345,186 @@ export default function WallPainter({ panelConfig, onExport }: Props) {
         );
     }
 
+    const getRectColor = (type: RectType) => {
+        switch (type) {
+            case 'wall': return 'blue';
+            case 'window': return 'cyan';
+            case 'door': return 'orange';
+        }
+    };
+
     return (
-        <div className="relative w-full h-[75vh] bg-slate-900 rounded-xl overflow-hidden flex flex-col shadow-lg">
+        <div className="relative w-full h-[75vh] bg-slate-900 rounded-xl overflow-hidden flex flex-col shadow-lg border border-slate-800">
+
             {/* Floating Toolbar */}
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-md px-4 py-2 rounded-full shadow-lg flex gap-4 z-10 items-center">
-                <button onClick={() => setMode('reference')} className={`p-2 rounded-full ${mode === 'reference' ? 'bg-blue-100 text-blue-600' : 'text-slate-600 hover:bg-slate-100'}`} title="Schaal Lijn">
-                    <Ruler size={20} />
-                </button>
-                <button onClick={() => setMode('main')} disabled={!scale} className={`p-2 rounded-full ${mode === 'main' ? 'bg-blue-100 text-blue-600' : 'text-slate-600 hover:bg-slate-100'} ${!scale && 'opacity-50'}`} title="Muur Tekenen">
-                    <Square size={20} />
-                </button>
-                <button onClick={() => setMode('exclusion')} disabled={!isMainClosed} className={`p-2 rounded-full ${mode === 'exclusion' ? 'bg-red-100 text-red-600' : 'text-slate-600 hover:bg-slate-100'} ${!isMainClosed && 'opacity-50'}`} title="Uitsluiting Tekenen">
-                    <PlusSquare size={20} />
-                </button>
-                <div className="w-[1px] h-6 bg-slate-300 mx-1"></div>
-                <button onClick={undo} className="p-2 text-slate-600 hover:bg-slate-100 rounded-full" title="Ongedaan maken">
-                    <Undo size={20} />
-                </button>
-                <button onClick={resetAll} className="p-2 text-slate-600 hover:bg-slate-100 rounded-full" title="Reset alles">
-                    <RefreshCw size={20} />
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md px-4 py-2 rounded-full shadow-lg flex gap-4 z-20 items-center">
+                <button onClick={addManualRect} className="p-2 text-slate-600 hover:bg-slate-100 hover:text-blue-600 rounded-full flex items-center gap-1 text-sm font-semibold" title="Rond/Deur Tekenen">
+                    <PlusSquare size={18} /> Toevoegen
                 </button>
             </div>
 
-            {/* Reference scale input popup */}
-            {referenceLine && referenceLine[0].x !== referenceLine[1].x && !scale && mode === 'reference' && (
-                <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-white p-3 rounded-lg shadow-xl z-20 flex gap-2 items-center">
-                    <input
-                        type="number"
-                        placeholder="Maat in cm"
-                        value={referenceInput}
-                        onChange={e => setReferenceInput(e.target.value)}
-                        className="w-24 border border-slate-300 rounded px-2 py-1 outline-none focus:border-blue-500 font-medium"
-                        autoFocus
-                    />
-                    <button onClick={setReferenceScale} className="bg-blue-600 text-white px-3 py-1 rounded font-semibold text-sm">OK</button>
-                </div>
-            )}
-
-            {/* Canvas Layer */}
+            {/* Editor Workspace */}
             <div
-                className="flex-1 w-full relative select-none touch-none"
+                className="flex-1 w-full relative select-none touch-none overflow-hidden"
                 ref={containerRef}
-                onMouseDown={(e) => {
-                    const rect = canvasRef.current?.getBoundingClientRect();
-                    if (rect) handlePointerDown(e.clientX, e.clientY);
-                }}
-                onMouseUp={(e) => {
-                    const rect = canvasRef.current?.getBoundingClientRect();
-                    if (rect) handlePointerUp(e.clientX, e.clientY);
-                }}
-                onTouchStart={(e) => {
-                    longPressTimer.current = setTimeout(() => {
-                        // long press logic: undo last point
-                        undo();
-                    }, 500);
-                    handlePointerDown(e.touches[0].clientX, e.touches[0].clientY);
-                }}
-                onTouchMove={() => {
-                    if (longPressTimer.current) clearTimeout(longPressTimer.current);
-                }}
-                onTouchEnd={(e) => {
-                    if (longPressTimer.current) clearTimeout(longPressTimer.current);
-                    if (e.changedTouches.length > 0) {
-                        handlePointerUp(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
-                    }
+                onPointerDown={() => {
+                    setSelectedRectId(null);
+                    setSettingMeasureId(null);
                 }}
             >
-                <canvas
-                    ref={canvasRef}
-                    className="absolute inset-0 w-full h-full object-contain"
-                    // Resize handler ensures internal res matches displayed res
-                    onLoad={(e) => {
-                        const el = e.target as HTMLCanvasElement;
-                        el.width = el.clientWidth;
-                        el.height = el.clientHeight;
-                        draw();
-                    }}
-                />
+                {/* The Wrapper Div fitting exactly over the image */}
+                <div
+                    ref={wrapperRef}
+                    className="absolute inset-0 m-auto"
+                    style={imgNatSize && containerRef.current ? (
+                        // Object Contain calculation
+                        (() => {
+                            const cw = containerRef.current.clientWidth;
+                            const ch = containerRef.current.clientHeight;
+                            const iRatio = imgNatSize.w / imgNatSize.h;
+                            const cRatio = cw / ch;
+                            if (iRatio > cRatio) {
+                                return { width: '100%', height: cw / iRatio };
+                            } else {
+                                return { width: ch * iRatio, height: '100%' };
+                            }
+                        })()
+                    ) : { width: '100%', height: '100%' }}
+                >
+                    <img src={photo} className="absolute inset-0 w-full h-full object-contain pointer-events-none opacity-80" />
+
+                    {aiStatus === 'loading' && (
+                        <div className="absolute inset-0 bg-slate-900/60 flex flex-col items-center justify-center z-50">
+                            <Loader2 size={48} className="animate-spin text-blue-500 mb-4" />
+                            <p className="text-white font-medium text-lg">AI analyseert gevel...</p>
+                            <p className="text-slate-300 text-sm mt-1">Schatting van schaal en ramen berekenen.</p>
+                        </div>
+                    )}
+
+                    {aiStatus === 'error' && (
+                        <div className="absolute inset-0 bg-slate-900/80 flex flex-col items-center justify-center z-50 p-6 text-center">
+                            <p className="text-red-400 font-bold mb-2">Oeps! Analyse mislukt</p>
+                            <p className="text-slate-300 text-sm">{aiErrorMsg}</p>
+                            <button onClick={() => setAiStatus('idle')} className="mt-4 bg-slate-700 px-4 py-2 rounded text-white text-sm">Zelf handmatig tekenen</button>
+                        </div>
+                    )}
+
+                    {/* Rectangles */}
+                    {rects.map(r => {
+                        const isSel = selectedRectId === r.id;
+                        const isMeasure = settingMeasureId === r.id;
+                        const color = getRectColor(r.type);
+                        const dimCm = getRectCm(r);
+
+                        return (
+                            <div
+                                key={r.id}
+                                className="absolute border-2 transition-colors cursor-move shadow-md"
+                                style={{
+                                    left: r.x * 100 + '%',
+                                    top: r.y * 100 + '%',
+                                    width: r.w * 100 + '%',
+                                    height: r.h * 100 + '%',
+                                    borderColor: isSel ? 'white' : color === 'blue' ? '#3b82f6' : color === 'cyan' ? '#06b6d4' : '#f97316',
+                                    backgroundColor: color === 'blue' ? 'rgba(59, 130, 246, 0.2)' : color === 'cyan' ? 'rgba(6, 182, 212, 0.2)' : 'rgba(249, 115, 22, 0.2)',
+                                    zIndex: isSel ? 10 : 1
+                                }}
+                                onPointerDown={(e) => handlePointerDown(r.id, 'move', e)}
+                                onPointerMove={onPointerMove}
+                                onPointerUp={onPointerUp}
+                            >
+                                {/* Top Label */}
+                                <div className="absolute -top-7 left-1/2 -translate-x-1/2 flex items-center gap-1 z-20">
+                                    <button
+                                        onPointerDown={(e) => cycleType(r.id, e)}
+                                        className="bg-black/80 backdrop-blur text-white text-xs font-bold px-2 py-1 rounded-md capitalize shadow hover:bg-slate-800"
+                                    >
+                                        {r.type}
+                                    </button>
+                                    {isSel && !isMeasure && (
+                                        <button onPointerDown={(e) => { e.stopPropagation(); setSettingMeasureId(r.id); }} className="bg-blue-600 text-white text-xs font-bold px-2 py-1 rounded-md shadow flex items-center gap-1">
+                                            <Maximize size={12} /> Maat instellen
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Delete Button */}
+                                {
+                                    isSel && (
+                                        <button onPointerDown={(e) => deleteRect(r.id, e)} className="absolute -top-3 -right-3 bg-red-500 text-white p-1 rounded-full shadow-lg z-20">
+                                            <Trash2 size={14} />
+                                        </button>
+                                    )
+                                }
+
+                                {/* Dimension Arrows UI */}
+                                {
+                                    isMeasure && (
+                                        <div className="absolute inset-0 pointer-events-none">
+                                            {/* Horizontal */}
+                                            <div className="absolute top-1/2 left-0 w-full border-t-2 border-dashed border-white flex justify-center items-center">
+                                                <input
+                                                    type="number"
+                                                    value={Math.round(dimCm.w)}
+                                                    onChange={(e) => setRectCm(r, Number(e.target.value))}
+                                                    className="w-16 text-center text-sm font-bold border-2 border-white bg-black/80 text-white rounded outline-none pointer-events-auto shadow-xl"
+                                                    onPointerDown={e => e.stopPropagation()}
+                                                />
+                                            </div>
+                                            {/* Vertical */}
+                                            <div className="absolute left-1/2 top-0 h-full border-l-2 border-dashed border-white flex justify-center items-center flex-col">
+                                                <input
+                                                    type="number"
+                                                    value={Math.round(dimCm.h)}
+                                                    onChange={(e) => setRectCmHeight(r, Number(e.target.value))}
+                                                    className="w-16 text-center text-sm font-bold border-2 border-white bg-black/80 text-white rounded outline-none pointer-events-auto shadow-xl z-20"
+                                                    onPointerDown={e => e.stopPropagation()}
+                                                />
+                                            </div>
+                                        </div>
+                                    )
+                                }
+                                {
+                                    !isMeasure && imageWidthCm && (
+                                        <div className="absolute bottom-1 right-2 text-white text-xs font-bold drop-shadow-md pointer-events-none">
+                                            {Math.round(dimCm.w)}x{Math.round(dimCm.h)} cm
+                                        </div>
+                                    )
+                                }
+
+                                {/* Drag Handles */}
+                                {
+                                    isSel && !isMeasure && (
+                                        <>
+                                            {[
+                                                { h: 'tl', t: -6, l: -6 }, { h: 'tr', t: -6, r: -6 },
+                                                { h: 'bl', b: -6, l: -6 }, { h: 'br', b: -6, r: -6 },
+                                                { h: 't', t: -6, l: '50%', ml: -6 }, { h: 'b', b: -6, l: '50%', ml: -6 },
+                                                { h: 'l', l: -6, t: '50%', mt: -6 }, { h: 'r', r: -6, t: '50%', mt: -6 }
+                                            ].map(pos => (
+                                                <div
+                                                    key={pos.h}
+                                                    onPointerDown={(e) => handlePointerDown(r.id, pos.h as HandleType, e)}
+                                                    className="absolute bg-white border-2 border-blue-500 shadow-sm z-30"
+                                                    style={{
+                                                        width: 14, height: 14,
+                                                        top: pos.t, bottom: pos.b, left: pos.l, right: pos.r,
+                                                        marginLeft: pos.ml, marginTop: pos.mt,
+                                                        cursor: pos.h.includes('l') && pos.h.includes('t') ? 'nwse-resize' : pos.h === 'tr' || pos.h === 'bl' ? 'nesw-resize' : pos.h === 't' || pos.h === 'b' ? 'ns-resize' : 'ew-resize'
+                                                    }}
+                                                />
+                                            ))}
+                                        </>
+                                    )
+                                }
+                            </div>
+                        );
+                    })}
+                </div>
             </div>
 
             {/* Bottom Sticky Action Bar */}
-            <div className="bg-slate-800 text-white p-4 flex items-center justify-between shrink-0">
+            <div className="bg-slate-800 text-white p-4 flex items-center justify-between shrink-0 z-20">
                 <div className="flex gap-6">
                     <div>
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Netto m²</p>
@@ -515,18 +537,18 @@ export default function WallPainter({ panelConfig, onExport }: Props) {
                 </div>
 
                 <button
-                    disabled={!calculations}
+                    disabled={!calculations || !rects.some(r => r.type === 'wall')}
                     onClick={() => {
                         if (calculations) {
                             onExport(calculations.exportWall, calculations.exportExcls);
                         }
                     }}
-                    className={`px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 transition-all shadow-lg ${calculations ? 'bg-orange-500 hover:bg-orange-600 shadow-orange-500/30 text-white' : 'bg-slate-700 text-slate-400 cursor-not-allowed'}`}
+                    className={`px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 transition-all shadow-lg ${calculations && rects.some(r => r.type === 'wall') ? 'bg-orange-500 hover:bg-orange-600 shadow-orange-500/30 text-white' : 'bg-slate-700 text-slate-400 cursor-not-allowed'}`}
                 >
                     <Calculator size={18} />
                     Snijplan
                 </button>
             </div>
-        </div>
+        </div >
     );
 }

@@ -76,3 +76,70 @@ Geef ALLEEN geldige JSON terug.`;
         throw new Error("Er is een onbekende fout opgetreden bij het analyseren van de foto.");
     }
 }
+
+export interface PainterVisionResult {
+    mainWall: { x: number; y: number; w: number; h: number };
+    exclusions: Array<{ type: 'window' | 'door'; x: number; y: number; w: number; h: number }>;
+    estimatedMainWallCm: { w: number; h: number };
+}
+
+export async function analyzeWallImageForPainter(base64Image: string): Promise<PainterVisionResult> {
+    const apiKey = getApiKey();
+
+    if (!apiKey) {
+        throw new Error("Geen API Key ingesteld. Vul deze eerst in via de instellingen.");
+    }
+
+    const base64Data = base64Image.split(',')[1] || base64Image;
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
+
+    const prompt = `
+Analyseer deze gevelfoto en retourneer uitsluitend het volgende JSON object, zonder uitleg:
+{
+  "mainWall": { "x": 0.05, "y": 0.02, "w": 0.90, "h": 0.95 },
+  "exclusions": [
+    { "type": "window", "x": 0.10, "y": 0.20, "w": 0.15, "h": 0.25 },
+    { "type": "door", "x": 0.60, "y": 0.50, "w": 0.12, "h": 0.40 }
+  ],
+  "estimatedMainWallCm": { "w": 800, "h": 300 }
+}
+Alle coördinaten (x, y, w, h) moeten lokaal/relatief (waarde 0.0 tot 1.0) zijn ten opzichte van de foto-afmetingen (vanaf linksboven origin). x en y zijn de linker-top hoek van het gebied.
+estimatedMainWallCm is een schatting in CM op basis van standaard bouwmaten.
+Als er geen ramen of deuren zijn, wees dan leeg: exclusions: [].
+`;
+
+    try {
+        const imagePart: Part = {
+            inlineData: {
+                data: base64Data,
+                mimeType: "image/jpeg"
+            }
+        };
+
+        const result = await model.generateContent([prompt, imagePart]);
+        const response = await result.response;
+        let textContent = response.text();
+
+        if (!textContent) {
+            throw new Error("Ongeldig antwoord van de AI (Geen tekst gevonden).");
+        }
+
+        let jsonStr = textContent.trim();
+        if (jsonStr.startsWith('```json')) {
+            jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
+        } else if (jsonStr.startsWith('```')) {
+            jsonStr = jsonStr.replace(/```/g, '').trim();
+        }
+
+        const parsedResult = JSON.parse(jsonStr) as PainterVisionResult;
+        return parsedResult;
+
+    } catch (err: unknown) {
+        if (err instanceof Error) {
+            throw new Error("Vision API fout: " + err.message);
+        }
+        throw new Error("Er is een onbekende fout opgetreden bij het analyseren van de foto.");
+    }
+}
